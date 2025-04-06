@@ -55,6 +55,7 @@ jupyterlab_pygments==0.3.0
 jupyterlab_server==2.27.3
 jupyterlab_widgets==3.0.13
 kiwisolver==1.4.8
+lxml==5.3.2
 MarkupSafe==3.0.2
 matplotlib==3.10.1
 matplotlib-inline==0.1.7
@@ -90,6 +91,7 @@ Pygments==2.19.1
 pyparsing==3.2.3
 python-dateutil==2.9.0.post0
 python-json-logger==3.3.0
+pytrends==4.9.2
 pytz==2025.2
 PyYAML==6.0.2
 pyzmq==26.4.0
