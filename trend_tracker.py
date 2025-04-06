@@ -4,7 +4,7 @@ import time
 import datetime
 import os
 import logging
-import random
+import sys
 
 # Set up logging
 logging.basicConfig(
@@ -17,17 +17,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger()
 
-class SimpleTrendTracker:
+class MinimalTrendTracker:
     def __init__(self):
-        """Initialize the tracker with basic configuration"""
-        # Use more robust connection settings
-        self.pytrends = TrendReq(
-            hl='en-US', 
-            tz=360,
-            timeout=(10, 25),
-            retries=2,
-            backoff_factor=1
-        )
+        """Initialize the tracker with minimal configuration"""
+        # Simple initialization
+        self.pytrends = TrendReq(hl='en-US', tz=360)
         self.output_dir = "trend_data"
         
         # Create output directory if it doesn't exist
@@ -35,55 +29,31 @@ class SimpleTrendTracker:
             os.makedirs(self.output_dir)
             logger.info(f"Created output directory: {self.output_dir}")
     
-    def _save_to_csv(self, df, prefix):
-        """Helper method to save a dataframe to CSV with timestamp"""
+    def save_to_csv(self, df, name):
+        """Save DataFrame to CSV with timestamp"""
         if df is None or df.empty:
-            logger.warning(f"No data to save for {prefix}")
+            logger.warning(f"No data to save for {name}")
             return None
             
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{prefix}_{timestamp}.csv"
+        filename = f"{name}_{timestamp}.csv"
         filepath = os.path.join(self.output_dir, filename)
         
         df.to_csv(filepath)
-        logger.info(f"Saved {prefix} data to {filepath}")
+        logger.info(f"Saved {name} data to {filepath}")
         return filepath
     
-    def get_daily_trends(self):
-        """Get daily search trends"""
-        try:
-            logger.info("Fetching daily search trends...")
-            # Try to get trending searches - use US as fallback if needed
-            try:
-                df = self.pytrends.trending_searches(pn='united_states')
-            except Exception as e:
-                logger.warning(f"Error with default trending_searches: {e}")
-                # Try another country
-                countries = ['united_kingdom', 'india', 'canada', 'australia']
-                random_country = random.choice(countries)
-                logger.info(f"Trying with country: {random_country}")
-                df = self.pytrends.trending_searches(pn=random_country)
-            
-            # Save the results
-            self._save_to_csv(df, "daily_trends")
-            return df
-            
-        except Exception as e:
-            logger.error(f"Error getting daily trends: {e}")
-            return None
-    
-    def track_keywords(self, keywords, timeframe='now 7-d', geo=''):
+    def track_keywords(self, keywords, timeframe='now 7-d'):
         """
-        Track specific keywords and save results
+        Track specific keywords and save interest over time
         
         Args:
             keywords: List of keywords to track (max 5)
             timeframe: Time period to analyze
-            geo: Geographic location (empty for worldwide)
         """
         if not keywords:
             logger.warning("No keywords provided")
-            return None
+            return False
             
         # Limit to 5 keywords (Google Trends limitation)
         keywords = keywords[:5]
@@ -94,108 +64,169 @@ class SimpleTrendTracker:
             self.pytrends.build_payload(
                 keywords, 
                 cat=0, 
-                timeframe=timeframe, 
-                geo=geo
+                timeframe=timeframe
             )
             
-            # Get interest over time
-            time.sleep(1)  # Brief pause to avoid rate limits
+            # Get interest over time (this is the most reliable API call)
             interest_df = self.pytrends.interest_over_time()
-            self._save_to_csv(interest_df, f"keyword_interest")
             
-            # Get related queries
-            time.sleep(1)  # Brief pause to avoid rate limits
-            related_queries = self.pytrends.related_queries()
+            if interest_df is None or interest_df.empty:
+                logger.warning("No interest data returned for keywords")
+                return False
+                
+            # Success - save to CSV
+            self.save_to_csv(interest_df, "keyword_interest")
             
-            # Save related queries for each keyword
-            for keyword in keywords:
-                if keyword in related_queries and related_queries[keyword]['top'] is not None:
-                    self._save_to_csv(related_queries[keyword]['top'], f"related_{keyword}")
+            # Try to get interest by region (this sometimes works)
+            try:
+                region_df = self.pytrends.interest_by_region(resolution='COUNTRY', inc_low_vol=True)
+                if region_df is not None and not region_df.empty:
+                    self.save_to_csv(region_df, "interest_by_region")
+            except Exception as e:
+                logger.warning(f"Could not get regional data: {e}")
             
-            return {
-                'interest': interest_df,
-                'related': related_queries
-            }
+            return True
             
         except Exception as e:
             logger.error(f"Error tracking keywords: {e}")
-            return None
+            return False
     
-    def get_realtime_trends(self):
-        """Get real-time trending searches"""
+    def get_related_topics(self, keyword):
+        """Get related topics for a single keyword"""
         try:
-            logger.info("Fetching real-time trending searches...")
-            df = self.pytrends.realtime_trending_searches(pn='US')
-            self._save_to_csv(df, "realtime_trends")
-            return df
+            logger.info(f"Getting related topics for: {keyword}")
+            
+            # Build the payload for a single keyword
+            self.pytrends.build_payload([keyword], cat=0, timeframe='today 12-m')
+            
+            # Get related topics
+            related_topics = self.pytrends.related_topics()
+            
+            if keyword in related_topics:
+                # Try to save "top" topics
+                if 'top' in related_topics[keyword] and related_topics[keyword]['top'] is not None:
+                    top_df = related_topics[keyword]['top']
+                    self.save_to_csv(top_df, f"related_topics_{keyword}")
+                
+                # Try to save "rising" topics
+                if 'rising' in related_topics[keyword] and related_topics[keyword]['rising'] is not None:
+                    rising_df = related_topics[keyword]['rising']
+                    self.save_to_csv(rising_df, f"rising_topics_{keyword}")
+                    
+                return True
+            else:
+                logger.warning(f"No related topics found for {keyword}")
+                return False
+                
         except Exception as e:
-            logger.error(f"Error getting real-time trends: {e}")
-            return None
+            logger.error(f"Error getting related topics for {keyword}: {e}")
+            return False
     
-    def run_basic_monitoring(self, custom_keywords=None, interval_seconds=3600, max_iterations=None):
+    def run_tracking(self, keyword_sets, interval_hours=1, max_runs=None):
         """
-        Run basic monitoring cycle
+        Run tracking for multiple keyword sets
         
         Args:
-            custom_keywords: Optional list of keywords to track
-            interval_seconds: How often to check (default: hourly)
-            max_iterations: Maximum number of iterations (None for unlimited)
+            keyword_sets: List of keyword sets (each set max 5 keywords)
+            interval_hours: Hours between runs
+            max_runs: Maximum number of runs (None for unlimited)
         """
-        # Default keywords if none provided
-        default_keywords = ['AI', 'machine learning', 'python', 'data science', 'technology']
-        keywords_to_track = custom_keywords if custom_keywords else default_keywords
+        if not keyword_sets:
+            logger.error("No keyword sets provided")
+            return
+            
+        # Validate keyword sets
+        validated_sets = []
+        for i, keyword_set in enumerate(keyword_sets):
+            if not keyword_set:
+                continue
+                
+            # Trim to 5 keywords
+            if len(keyword_set) > 5:
+                logger.warning(f"Keyword set {i+1} has more than 5 keywords; trimming to first 5")
+                keyword_set = keyword_set[:5]
+                
+            validated_sets.append(keyword_set)
+            
+        if not validated_sets:
+            logger.error("No valid keyword sets after validation")
+            return
+            
+        logger.info(f"Starting tracking with {len(validated_sets)} keyword sets")
+        for i, keywords in enumerate(validated_sets):
+            logger.info(f"Set {i+1}: {', '.join(keywords)}")
+            
+        # Convert hours to seconds
+        interval_seconds = interval_hours * 3600
+        run_count = 0
         
-        logger.info(f"Starting basic monitoring with {interval_seconds}s interval")
-        logger.info(f"Will track keywords: {keywords_to_track}")
-        
-        iteration = 1
         try:
             while True:
-                logger.info(f"Starting iteration {iteration}")
+                run_count += 1
+                logger.info(f"Starting run #{run_count}")
                 
-                # Get trending topics (try both methods)
-                try:
-                    self.get_daily_trends()
-                except Exception as e:
-                    logger.error(f"Failed to get daily trends: {e}")
+                # Process each keyword set
+                for i, keywords in enumerate(validated_sets):
+                    logger.info(f"Processing keyword set {i+1}: {', '.join(keywords)}")
+                    
+                    # Track this set of keywords
+                    success = self.track_keywords(keywords)
+                    
+                    # If we successfully tracked keywords, also try to get related topics
+                    # for the first keyword in the set (to avoid too many API calls)
+                    if success and keywords:
+                        # Add a short delay to avoid hitting rate limits
+                        time.sleep(3)
+                        self.get_related_topics(keywords[0])
+                    
+                    # Add a delay between keyword sets
+                    if i < len(validated_sets) - 1:
+                        logger.info("Waiting 5 seconds before next keyword set...")
+                        time.sleep(5)
                 
-                try:
-                    self.get_realtime_trends()
-                except Exception as e:
-                    logger.error(f"Failed to get realtime trends: {e}")
-                
-                # Track specified keywords
-                self.track_keywords(keywords_to_track)
-                
-                # Check if we've reached maximum iterations
-                if max_iterations and iteration >= max_iterations:
-                    logger.info(f"Reached maximum iterations ({max_iterations}). Stopping.")
+                # Check if we've reached the maximum number of runs
+                if max_runs and run_count >= max_runs:
+                    logger.info(f"Reached maximum runs ({max_runs}). Stopping.")
                     break
-                
-                # Sleep until next check
-                logger.info(f"Sleeping for {interval_seconds} seconds until next check...")
+                    
+                # Wait for the next interval
+                next_run_time = datetime.datetime.now() + datetime.timedelta(seconds=interval_seconds)
+                logger.info(f"Run completed. Next run at: {next_run_time.strftime('%Y-%m-%d %H:%M:%S')}")
+                logger.info(f"Sleeping for {interval_hours} hours...")
                 time.sleep(interval_seconds)
-                iteration += 1
                 
         except KeyboardInterrupt:
-            logger.info("Monitoring stopped by user (KeyboardInterrupt)")
+            logger.info("Tracking stopped by user (Ctrl+C)")
         except Exception as e:
-            logger.error(f"Unexpected error during monitoring: {e}")
-        
-        logger.info("Monitoring finished")
+            logger.error(f"Unexpected error during tracking: {e}")
+            
+        logger.info("Tracking finished")
 
-# Simple command-line execution
-if __name__ == "__main__":
-    # Create the tracker
-    tracker = SimpleTrendTracker()
+def main():
+    """Main function to run the tracker"""
+    # Create tracker
+    tracker = MinimalTrendTracker()
     
-    # Use these keywords or customize them
-    keywords = ['AI', 'machine learning', 'python', 'data science', 'technology']
+    # Define your keyword sets here (each set limited to 5 keywords)
+    keyword_sets = [
+        ['AI', 'machine learning', 'data science'],
+        ['python', 'javascript', 'programming'],
+        ['bitcoin', 'ethereum', 'cryptocurrency'],
+        ['mobile apps', 'software development', 'tech startups'],
+    ]
     
-    # Run monitoring (every hour, with default keywords)
-    # To stop, press Ctrl+C
-    tracker.run_basic_monitoring(
-        custom_keywords=keywords,
-        interval_seconds=3600,  # Check hourly
-        max_iterations=None  # Run indefinitely
+    # Set your tracking interval (in hours)
+    interval_hours = 1
+    
+    # Set maximum runs (None for unlimited)
+    max_runs = None
+    
+    # Run the tracker
+    tracker.run_tracking(
+        keyword_sets=keyword_sets,
+        interval_hours=interval_hours,
+        max_runs=max_runs
     )
+
+if __name__ == "__main__":
+    main()
